@@ -119,11 +119,12 @@ def check_course_in_slots(course_code):
                 slot_soup = BeautifulSoup(response.text, 'html.parser')
                 vacancy = None
                 for td in slot_soup.find_all('td'):
-                    if course_code in td.text:
-                        badge = td.find('span', {'class': 'badge badge-success'})
-                        if badge:
-                            vacancy = badge.text.strip()
+                    if course_code in td.get_text():
+                        badge = td.find('span', class_='badge')
+                        if badge and 'badge-success' in badge.get('class', []):
+                            vacancy = badge.get_text(strip=True)
                         break
+
                 vacancy_msg = f" with {vacancy} vacancies" if vacancy else ""
                 send_telegram(
                     f"🔄 Checking course: {course_code}\n"
