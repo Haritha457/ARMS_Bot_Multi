@@ -17,11 +17,14 @@ SEND_MSG_URL = f"{TELEGRAM_URL}/sendMessage"
 
 # State
 monitoring_enabled = False
-course_list = []  # Multi-course list
+course_list = []      # now holds multiple course codes
 last_update_id = None
 
 # Slot Map
-tt={ 'O':'15','P':'16','Q':'17','R':'18','S':'19','T':'20' }
+slot_map = {
+    'O': '15','P': '16','Q': '17',
+    'R': '18','S': '19','T': '20'
+}
 
 # Send Telegram Message
 def send_telegram(text):
@@ -30,7 +33,7 @@ def send_telegram(text):
     except:
         pass
 
-# Vacancy extraction using BeautifulSoup
+# Extract vacancy count for a course in slot data
 def get_vacancy(html, course):
     soup = BeautifulSoup(html, "html.parser")
     for td in soup.find_all("td"):
@@ -40,9 +43,9 @@ def get_vacancy(html, course):
             if span and span.text.isdigit():
                 return int(span.text)
             return 0
-    return -1  # not found
+    return -1  # not present
 
-# Handle commands
+# Handle /start, /stop, and course input
 def check_for_commands():
     global monitoring_enabled, course_list, last_update_id
     try:
@@ -51,77 +54,95 @@ def check_for_commands():
             url += f"&offset={last_update_id+1}"
         updates = requests.get(url).json().get("result", [])
         for u in updates:
-            msg = u.get("message",{})
-            text = msg.get("text","").strip()
+            msg = u.get("message", {})
+            text = msg.get("text", "").strip()
+            cid = msg.get("chat", {}).get("id")
             uid = u["update_id"]
-            cid = msg.get("chat",{}).get("id")
-            if str(cid)!=CHAT_ID: continue
+            if str(cid) != CHAT_ID:
+                continue
             last_update_id = uid
-            cmd = text.lower()
-            if cmd=="/start":
-                monitoring_enabled=True
-                course_list=[]
+
+            if text.lower() == "/start":
+                monitoring_enabled = True
+                course_list = []
                 send_telegram("🤖 Monitoring started. Enter courses (comma or space separated):")
-            elif cmd=="/stop":
-                monitoring_enabled=False
-                course_list=[]
+
+            elif text.lower() == "/stop":
+                monitoring_enabled = False
+                course_list = []
                 send_telegram("🛑 Monitoring stopped.")
-            elif cmd=="/list":
-                send_telegram("📋 Monitoring courses: " + (", ".join(course_list) if course_list else "none"))
+
+            elif text.lower() == "/list":
+                send_telegram("📋 Monitoring courses: " +
+                              (", ".join(course_list) if course_list else "none"))
+
             elif monitoring_enabled:
-                # parse courses
-                parts = re.split(r"[ ,]+", text)
-                courses = [p.upper() for p in parts if p]
-                course_list = courses
-                send_telegram(f"📌 Monitoring courses: {', '.join(course_list)}")
+                # parse comma or space separated courses
+                parts = re.split(r"[,\s]+", text)
+                parsed = [p.upper() for p in parts if p]
+                if parsed:
+                    course_list = parsed
+                    send_telegram(f"📌 Monitoring courses: {', '.join(course_list)}")
+
     except:
         pass
 
-# Check all courses in slots
+# Main multi-course vacancy check with original output style
 def check_courses():
     session = requests.Session()
-    # login
+    # Login
     login_url = "https://arms.sse.saveetha.com/"
     r = session.get(login_url)
-    soup = BeautifulSoup(r.text,'html.parser')
+    soup = BeautifulSoup(r.text, 'html.parser')
     payload = {
-        '__VIEWSTATE': soup.find('input',{'name':'__VIEWSTATE'}).get('value'),
-        '__VIEWSTATEGENERATOR': soup.find('input',{'name':'__VIEWSTATEGENERATOR'}).get('value'),
-        '__EVENTVALIDATION': soup.find('input',{'name':'__EVENTVALIDATION'}).get('value'),
-        'txtusername':USERNAME,'txtpassword':PASSWORD,'btnlogin':'Login'
+        '__VIEWSTATE': soup.find('input', {'name': '__VIEWSTATE'}).get('value'),
+        '__VIEWSTATEGENERATOR': soup.find('input', {'name': '__VIEWSTATEGENERATOR'}).get('value'),
+        '__EVENTVALIDATION': soup.find('input', {'name': '__EVENTVALIDATION'}).get('value'),
+        'txtusername': USERNAME, 'txtpassword': PASSWORD, 'btnlogin': 'Login'
     }
-    session.post(login_url,data=payload)
+    session.post(login_url, data=payload)
     session.get("https://arms.sse.saveetha.com/StudentPortal/Enrollment.aspx")
-    # progress
-    send_telegram(f"🔍 Scanning {len(course_list)} courses: {', '.join(course_list)}")
-    found_any=False
-    for slot, sid in tt.items():
-        send_telegram(f"🔎 Checking Slot {slot}...")
-        data = session.get(f"https://arms.sse.saveetha.com/Handler/Student.ashx?Page=StudentInfobyId&Mode=GetCourseBySlot&Id={sid}").text
-        for c in course_list:
-            vac = get_vacancy(data,c)
-            if vac>0:
-                send_telegram(f"🎯 AVAILABLE: {c} has {vac} seats in Slot {slot}!")
-                found_any=True
-    if not found_any:
-        send_telegram(f"❌ No vacancies found for {', '.join(course_list)}")
+
+    # For each course, replicate old single-course logic but include vacancy
+    for course in course_list:
+        found = False
+        vacancy = 0
+        for slot, sid in slot_map.items():
+            api_url = (f"https://arms.sse.saveetha.com/Handler/Student.ashx?"
+                       f"Page=StudentInfobyId&Mode=GetCourseBySlot&Id={sid}")
+            resp = session.get(api_url)
+            if resp.status_code == 200:
+                v = get_vacancy(resp.text, course)
+                if v > 0:
+                    found = True
+                    vacancy = v
+                    send_telegram(f"🔄 Checking course: {course}\n"
+                                  f"🎯 Found in Slot {slot} with {vacancy} seats!")
+                    break
+        if not found:
+            send_telegram(f"🔄 Checking course: {course}\n"
+                          f"❌ Not found in any slot or no seats available.")
 
 # Keep-alive
-app=Flask('')
+app = Flask('')
 @app.route('/')
-def home(): return "✅ Bot alive"
-def run(): app.run(host='0.0.0.0',port=8080)
-Thread(target=run,daemon=True).start()
+def home():
+    return "✅ Bot is alive!"
+def run():
+    app.run(host='0.0.0.0', port=8080)
+Thread(target=run, daemon=True).start()
 
-send_telegram("🤖 Bot is running. Send /start to begin.")
+# Start
+send_telegram("🤖 Bot is running. Send /start to begin monitoring.")
 while True:
     check_for_commands()
     if monitoring_enabled and course_list:
-        start=time.time()
+        start = time.time()
         check_courses()
-        # fixed 15-min
-        nt = start+900
-        while time.time()<nt:
-            check_for_commands(); time.sleep(min(3,nt-time.time()))
+        # Fixed 15-minute delay
+        next_t = start + 900
+        while time.time() < next_t:
+            check_for_commands()
+            time.sleep(min(3, next_t - time.time()))
     else:
         time.sleep(5)
