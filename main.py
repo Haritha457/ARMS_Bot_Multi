@@ -2,27 +2,30 @@ import requests
 from bs4 import BeautifulSoup
 import time
 import os
-import re
 from flask import Flask
 from threading import Thread
 
 # Load from environment
-BOT_TOKEN       = os.getenv("BOT_TOKEN")
-CHAT_ID         = os.getenv("CHAT_ID")
-USERNAME        = os.getenv("ARMS_USERNAME")
-PASSWORD        = os.getenv("ARMS_PASSWORD")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+USERNAME = os.getenv("ARMS_USERNAME")
+PASSWORD = os.getenv("ARMS_PASSWORD")
 
-TELEGRAM_URL    = f"https://api.telegram.org/bot{BOT_TOKEN}"
-SEND_MSG_URL    = f"{TELEGRAM_URL}/sendMessage"
+TELEGRAM_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
+SEND_MSG_URL = f"{TELEGRAM_URL}/sendMessage"
 
 # State
 monitoring_enabled = False
-current_course     = None
-course_queue       = []    # Holds additional courses
-last_update_id     = None
+current_course = None
+last_update_id = None
+course_just_found = False
 
 # Slot Map
 slot_map = {
+    'G': '7',
+    'H': '8',
+    'M': '13',
+    'N': '14',
     'O': '15',
     'P': '16',
     'Q': '17',
@@ -38,126 +41,156 @@ def send_telegram(text):
     except:
         pass
 
-# Extract vacancy count
-def get_vacancy(html, course):
-    soup = BeautifulSoup(html, "html.parser")
-    for td in soup.find_all("td"):
-        lbl = td.find("label")
-        if lbl and course in lbl.get_text():
-            span = td.find("span", class_="badge")
-            if span and span.text.isdigit():
-                return True, int(span.text)
-            return True, 0
-    return False, 0
-
-# Handle commands
+# Handle /start, /stop and course input
 def check_for_commands():
-    global monitoring_enabled, current_course, course_queue, last_update_id
+    global monitoring_enabled, current_course, last_update_id, course_just_found
     try:
         url = f"{TELEGRAM_URL}/getUpdates?timeout=5"
         if last_update_id is not None:
             url += f"&offset={last_update_id + 1}"
-        updates = requests.get(url).json().get("result", [])
-        for u in updates:
-            msg  = u.get("message", {})
+        resp = requests.get(url).json()
+        updates = resp.get("result", [])
+        for update in updates:
+            msg = update.get("message", {})
             text = msg.get("text", "").strip()
-            cid  = msg.get("chat", {}).get("id")
-            uid  = u.get("update_id")
-            if str(cid) != CHAT_ID:
+            chat_id = msg.get("chat", {}).get("id")
+            update_id = update["update_id"]
+
+            if str(chat_id) != CHAT_ID:
                 continue
-            last_update_id = uid
+
+            last_update_id = update_id
 
             if text.lower() == "/start":
                 monitoring_enabled = True
-                current_course     = None
-                course_queue       = []
-                send_telegram("🤖 Monitoring started. Enter one or more course codes separated by space or comma:")
-            
+                current_course = None
+                course_just_found = False
+                send_telegram("🤖 Monitoring started. Please enter the course code (e.g. ECA20):")
+
             elif text.lower() == "/stop":
                 monitoring_enabled = False
-                current_course     = None
-                course_queue       = []
+                current_course = None
+                course_just_found = False
                 send_telegram("🛑 Monitoring stopped.")
-            
-            elif monitoring_enabled and not current_course and text:
-                # Split input into multiple codes
-                parts = re.split(r"[,\s]+", text.upper())
-                if parts:
-                    current_course = parts[0]
-                    course_queue   = parts[1:]
-                    send_telegram(f"📌 Monitoring course: {current_course}")
 
-            elif text.lower() == "/list":
-                lst = [current_course] + course_queue if current_course else course_queue
-                send_telegram("📋 Queued courses: " + (", ".join(lst) if lst else "none"))
+            elif monitoring_enabled and not current_course:
+                current_course = text.upper()
+                course_just_found = False
+                send_telegram(f"📌 Monitoring course: {current_course}")
 
-    except:
-        pass
+    except Exception as e:
+        send_telegram(f"⚠️ Error reading Telegram: {e}")
 
-# Main course check logic
+# Main course checking logic
 def check_course_in_slots(course_code):
-    session   = requests.Session()
+    session = requests.Session()
     login_url = "https://arms.sse.saveetha.com/"
-    r         = session.get(login_url)
-    soup      = BeautifulSoup(r.text, 'html.parser')
-    payload   = {
-        '__VIEWSTATE':         soup.find('input', {'name': '__VIEWSTATE'}).get('value'),
-        '__VIEWSTATEGENERATOR':soup.find('input', {'name': '__VIEWSTATEGENERATOR'}).get('value'),
-        '__EVENTVALIDATION':   soup.find('input', {'name': '__EVENTVALIDATION'}).get('value'),
-        'txtusername':         USERNAME,
-        'txtpassword':         PASSWORD,
-        'btnlogin':            'Login'
-    }
-    session.post(login_url, data=payload)
-    session.get("https://arms.sse.saveetha.com/StudentPortal/Enrollment.aspx")
+    enrollment_url = "https://arms.sse.saveetha.com/StudentPortal/Enrollment.aspx"
+    api_base = "https://arms.sse.saveetha.com/Handler/Student.ashx?Page=StudentInfobyId&Mode=GetCourseBySlot&Id="
 
-    # Check each slot
-    for slot, sid in slot_map.items():
-        api_url = (
-            f"https://arms.sse.saveetha.com/Handler/Student.ashx?"
-            f"Page=StudentInfobyId&Mode=GetCourseBySlot&Id={sid}"
-        )
-        resp = session.get(api_url)
-        if resp.status_code == 200:
-            found, vac = get_vacancy(resp.text, course_code)
-            if found and vac > 0:
-                send_telegram(
-                    f"🔄 Checking course: {course_code}\n"
-                    f"🎯 Found in Slot {slot} with {vac} seats!"
-                )
+    try:
+        # Login
+        resp = session.get(login_url)
+        soup = BeautifulSoup(resp.text, 'html.parser')
+
+        payload = {
+            '__VIEWSTATE': soup.find('input', {'name': '__VIEWSTATE'}).get('value'),
+            '__VIEWSTATEGENERATOR': soup.find('input', {'name': '__VIEWSTATEGENERATOR'}).get('value'),
+            '__EVENTVALIDATION': soup.find('input', {'name': '__EVENTVALIDATION'}).get('value'),
+            'txtusername': USERNAME,
+            'txtpassword': PASSWORD,
+            'btnlogin': 'Login'
+        }
+
+        headers = {
+            'User-Agent': 'Mozilla/5.0',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Referer': login_url
+        }
+
+        login_resp = session.post(login_url, data=payload, headers=headers)
+        if "Logout" not in login_resp.text:
+            send_telegram("❌ Login failed.")
+            return False
+
+        enroll_resp = session.get(enrollment_url)
+        if "Enrollment" not in enroll_resp.text:
+            send_telegram("❌ Enrollment page failed.")
+            return False
+
+        # Check each slot
+        for slot_name, slot_id in slot_map.items():
+            if not monitoring_enabled:
+                return False  # user stopped monitoring
+
+            api_url = api_base + slot_id
+            response = session.get(api_url)
+
+            if response.status_code == 200 and course_code in response.text:
+                send_telegram(f"🔄 Checking course: {course_code}\n🎯 Found in Slot {slot_name}!")
                 return True
-    send_telegram(
-        f"🔄 Checking course: {course_code}\n"
-        "❌ Not found in any slot or no seats available."
-    )
-    return False
 
-# Keep-alive for deployment
+        send_telegram(f"🔄 Checking course: {course_code}\n❌ Not found in any slot.")
+        return False
+
+    except Exception as e:
+        send_telegram(f"❌ Error during check: {e}")
+        return False
+
+# Uptime keep-alive for Railway
 app = Flask('')
+
 @app.route('/')
 def home():
     return "✅ Bot is alive!"
-def run():
-    app.run(host='0.0.0.0', port=8080)
-Thread(target=run, daemon=True).start()
 
-# Startup
+def run_web():
+    app.run(host='0.0.0.0', port=8080)
+
+def keep_alive():
+    t = Thread(target=run_web)
+    t.start()
+
+# Start
+keep_alive()
 send_telegram("🤖 Bot is running. Send /start to begin monitoring.")
+
+# 🔁 MAIN LOOP - Fixed timing logic
 while True:
-    check_for_commands()
-    if monitoring_enabled and current_course:
-        start = time.time()
-        found = check_course_in_slots(current_course)
-        # Advance to next course
-        if course_queue:
-            current_course = course_queue.pop(0)
-            send_telegram(f"📌 Next course: {current_course}")
+    try:
+        check_for_commands()
+
+        if monitoring_enabled and current_course:
+            # Record start time for precise 15-minute interval
+            cycle_start_time = time.time()
+            
+            found = check_course_in_slots(current_course)
+
+            if found:
+                send_telegram(f"✅ Monitoring complete for {current_course}. Please send the next course or /stop.")
+                current_course = None
+                course_just_found = True
+                continue
+
+            # Wait for exactly 15 minutes from start of cycle, checking commands every 3 seconds
+            next_check_time = cycle_start_time + 900  # 15 minutes = 900 seconds
+            
+            while time.time() < next_check_time:
+                if not monitoring_enabled or course_just_found:
+                    course_just_found = False
+                    break
+                
+                check_for_commands()
+                
+                # Sleep for 3 seconds, but don't exceed next check time
+                remaining_time = next_check_time - time.time()
+                sleep_time = min(3, remaining_time)
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+
         else:
-            current_course = None
-        # Fixed 15-minute delay
-        next_t = start + 900
-        while time.time() < next_t:
-            check_for_commands()
-            time.sleep(min(3, next_t - time.time()))
-    else:
-        time.sleep(5)
+            time.sleep(5)
+    
+    except Exception as e:
+        send_telegram(f"⚠️ Bot error: {str(e)[:100]}. Continuing...")
+        time.sleep(10)
