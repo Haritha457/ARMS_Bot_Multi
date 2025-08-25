@@ -55,29 +55,23 @@ def check_for_commands():
             text = msg.get("text", "").strip()
             chat_id = msg.get("chat", {}).get("id")
             update_id = update["update_id"]
-
             if str(chat_id) != CHAT_ID:
                 continue
-
             last_update_id = update_id
-
             if text.lower() == "/start":
                 monitoring_enabled = True
                 current_course = None
                 course_just_found = False
                 send_telegram("🤖 Monitoring started. Please enter the course code (e.g. ECA20):")
-
             elif text.lower() == "/stop":
                 monitoring_enabled = False
                 current_course = None
                 course_just_found = False
                 send_telegram("🛑 Monitoring stopped.")
-
             elif monitoring_enabled and not current_course:
                 current_course = text.upper()
                 course_just_found = False
                 send_telegram(f"📌 Monitoring course: {current_course}")
-
     except Exception as e:
         send_telegram(f"⚠️ Error reading Telegram: {e}")
 
@@ -87,12 +81,10 @@ def check_course_in_slots(course_code):
     login_url = "https://arms.sse.saveetha.com/"
     enrollment_url = "https://arms.sse.saveetha.com/StudentPortal/Enrollment.aspx"
     api_base = "https://arms.sse.saveetha.com/Handler/Student.ashx?Page=StudentInfobyId&Mode=GetCourseBySlot&Id="
-
     try:
         # Login
         resp = session.get(login_url)
         soup = BeautifulSoup(resp.text, 'html.parser')
-
         payload = {
             '__VIEWSTATE': soup.find('input', {'name': '__VIEWSTATE'}).get('value'),
             '__VIEWSTATEGENERATOR': soup.find('input', {'name': '__VIEWSTATEGENERATOR'}).get('value'),
@@ -101,13 +93,11 @@ def check_course_in_slots(course_code):
             'txtpassword': PASSWORD,
             'btnlogin': 'Login'
         }
-
         headers = {
             'User-Agent': 'Mozilla/5.0',
             'Content-Type': 'application/x-www-form-urlencoded',
             'Referer': login_url
         }
-
         login_resp = session.post(login_url, data=payload, headers=headers)
         if "Logout" not in login_resp.text:
             send_telegram("❌ Login failed.")
@@ -122,12 +112,23 @@ def check_course_in_slots(course_code):
         for slot_name, slot_id in slot_map.items():
             if not monitoring_enabled:
                 return False  # user stopped monitoring
-
             api_url = api_base + slot_id
             response = session.get(api_url)
-
             if response.status_code == 200 and course_code in response.text:
-                send_telegram(f"🔄 Checking course: {course_code}\n🎯 Found in Slot {slot_name}!")
+                # Parse vacancy
+                slot_soup = BeautifulSoup(response.text, 'html.parser')
+                vacancy = None
+                for td in slot_soup.find_all('td'):
+                    if course_code in td.text:
+                        badge = td.find('span', {'class': 'badge badge-success'})
+                        if badge:
+                            vacancy = badge.text.strip()
+                        break
+                vacancy_msg = f" with {vacancy} vacancies" if vacancy else ""
+                send_telegram(
+                    f"🔄 Checking course: {course_code}\n"
+                    f"🎯 Found in Slot {slot_name}{vacancy_msg}!"
+                )
                 return True
 
         send_telegram(f"🔄 Checking course: {course_code}\n❌ Not found in any slot.")
@@ -159,13 +160,10 @@ send_telegram("🤖 Bot is running. Send /start to begin monitoring.")
 while True:
     try:
         check_for_commands()
-
         if monitoring_enabled and current_course:
             # Record start time for precise 15-minute interval
             cycle_start_time = time.time()
-            
             found = check_course_in_slots(current_course)
-
             if found:
                 send_telegram(f"✅ Monitoring complete for {current_course}. Please send the next course or /stop.")
                 current_course = None
@@ -174,23 +172,17 @@ while True:
 
             # Wait for exactly 15 minutes from start of cycle, checking commands every 3 seconds
             next_check_time = cycle_start_time + 900  # 15 minutes = 900 seconds
-            
             while time.time() < next_check_time:
                 if not monitoring_enabled or course_just_found:
                     course_just_found = False
                     break
-                
                 check_for_commands()
-                
-                # Sleep for 3 seconds, but don't exceed next check time
                 remaining_time = next_check_time - time.time()
                 sleep_time = min(3, remaining_time)
                 if sleep_time > 0:
                     time.sleep(sleep_time)
-
-        else:
-            time.sleep(5)
-    
+                else:
+                    time.sleep(5)
     except Exception as e:
         send_telegram(f"⚠️ Bot error: {str(e)[:100]}. Continuing...")
         time.sleep(10)
