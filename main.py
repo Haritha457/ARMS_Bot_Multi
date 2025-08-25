@@ -75,6 +75,49 @@ def check_for_commands():
     except Exception as e:
         send_telegram(f"⚠️ Error reading Telegram: {e}")
 
+# Extract vacancy from HTML response
+def extract_vacancy(html_content, course_code):
+    try:
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        # Method 1: Look for td elements containing the course code
+        for td in soup.find_all('td'):
+            td_text = td.get_text()
+            if course_code in td_text:
+                # Look for any span with 'badge' class
+                spans = td.find_all('span')
+                for span in spans:
+                    span_classes = span.get('class', [])
+                    if 'badge' in span_classes:
+                        vacancy_text = span.get_text(strip=True)
+                        if vacancy_text.isdigit():
+                            return vacancy_text
+        
+        # Method 2: Look for all spans with badge classes
+        badges = soup.find_all('span', class_='badge')
+        for badge in badges:
+            badge_text = badge.get_text(strip=True)
+            if badge_text.isdigit():
+                # Check if this badge is near our course code
+                parent = badge.parent
+                if parent and course_code in parent.get_text():
+                    return badge_text
+        
+        # Method 3: Use regex-like approach to find numbers in spans
+        all_spans = soup.find_all('span')
+        for span in all_spans:
+            span_text = span.get_text(strip=True)
+            if span_text.isdigit() and len(span_text) <= 3:  # Vacancy likely 1-999
+                # Check if parent contains course code
+                parent = span.parent
+                if parent and course_code in parent.get_text():
+                    return span_text
+                    
+    except Exception as e:
+        send_telegram(f"⚠️ Vacancy parsing error: {e}")
+    
+    return None
+
 # Main course checking logic
 def check_course_in_slots(course_code):
     session = requests.Session()
@@ -115,21 +158,19 @@ def check_course_in_slots(course_code):
             api_url = api_base + slot_id
             response = session.get(api_url)
             if response.status_code == 200 and course_code in response.text:
-                # Parse vacancy
-                slot_soup = BeautifulSoup(response.text, 'html.parser')
-                vacancy = None
-                for td in slot_soup.find_all('td'):
-                    if course_code in td.get_text():
-                        badge = td.find('span', class_='badge')
-                        if badge and 'badge-success' in badge.get('class', []):
-                            vacancy = badge.get_text(strip=True)
-                        break
-
-                vacancy_msg = f" with {vacancy} vacancies" if vacancy else ""
-                send_telegram(
-                    f"🔄 Checking course: {course_code}\n"
-                    f"🎯 Found in Slot {slot_name}{vacancy_msg}!"
-                )
+                # Extract vacancy using multiple methods
+                vacancy = extract_vacancy(response.text, course_code)
+                
+                if vacancy:
+                    send_telegram(
+                        f"🔄 Checking course: {course_code}\n"
+                        f"🎯 Found in Slot {slot_name} with {vacancy} vacancies!"
+                    )
+                else:
+                    send_telegram(
+                        f"🔄 Checking course: {course_code}\n"
+                        f"🎯 Found in Slot {slot_name}! (Vacancy info not available)"
+                    )
                 return True
 
         send_telegram(f"🔄 Checking course: {course_code}\n❌ Not found in any slot.")
